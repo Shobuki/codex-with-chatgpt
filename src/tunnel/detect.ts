@@ -22,6 +22,24 @@ function accessibleFile(candidate: string): string | null {
   }
 }
 
+function resolveWindowsPath(exe: string): string | null {
+  if (process.platform !== "win32") return null;
+  try {
+    const result = spawnSync("where.exe", [exe], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 5000,
+    });
+    const first = (result.stdout ?? "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find(Boolean);
+    return first ? accessibleFile(first) : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Locate a binary on PATH or in common install locations. */
 export function findBinary(name: string): string | null {
   const exe = process.platform === "win32" ? `${name}.exe` : name;
@@ -31,7 +49,11 @@ export function findBinary(name: string): string | null {
   }
   try {
     const probe = spawnSync(exe, ["--version"], { stdio: "ignore", timeout: 5000 });
-    if (probe.status === 0 || probe.status === 1) return exe; // on PATH
+    if (probe.status === 0 || probe.status === 1) {
+      // Detached Windows processes can resolve a bare executable differently
+      // from the interactive shell. Keep the absolute path when available.
+      return resolveWindowsPath(exe) ?? exe;
+    }
   } catch {
     // not on PATH
   }

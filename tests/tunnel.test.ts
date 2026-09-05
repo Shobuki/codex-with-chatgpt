@@ -47,6 +47,7 @@ function setupTunnel(fetchImpl: FetchImpl, startTimeoutMs = 1_000) {
     spawnImpl,
     fetchImpl,
     startTimeoutMs,
+    healthWarmupMs: 0,
   });
   return { child, spawnImpl, tunnel };
 }
@@ -107,7 +108,18 @@ describe("CloudflaredQuickTunnel", () => {
     await expect(starting).resolves.toBe(QUICK_URL);
     expect(spawnImpl).toHaveBeenCalledWith(
       "cloudflared",
-      ["tunnel", "--url", "http://127.0.0.1:3333", "--no-autoupdate"],
+      [
+        "tunnel",
+        "--config",
+        process.platform === "win32" ? "NUL" : "/dev/null",
+        "--url",
+        "http://127.0.0.1:3333",
+        "--no-autoupdate",
+        "--protocol",
+        "http2",
+        "--edge-ip-version",
+        "4",
+      ],
       { stdio: ["ignore", "pipe", "pipe"], windowsHide: true }
     );
     expect(fetchImpl).toHaveBeenCalledWith(`${QUICK_URL}/health`, {

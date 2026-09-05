@@ -10,6 +10,7 @@ const QUICK_TUNNEL_URL_RE = /https:\/\/[^\s|]+/gi;
 const QUICK_TUNNEL_HOST_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.trycloudflare\.com$/i;
 const HEALTH_CHECK_INTERVAL_MS = 250;
 const HEALTH_CHECK_TIMEOUT_MS = 5_000;
+const QUICK_TUNNEL_DNS_WARMUP_MS = 15_000;
 
 function isBridgeHealth(payload: unknown): boolean {
   if (!payload || typeof payload !== "object") return false;
@@ -53,6 +54,7 @@ export function parseQuickTunnelUrl(line: string): string | null {
 
 export interface CloudflaredQuickTunnelOptions {
   startTimeoutMs?: number;
+  healthWarmupMs?: number;
   spawnImpl?: (
     command: string,
     args: string[],
@@ -72,6 +74,7 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
   private url: string | null = null;
   private lastError: string | null = null;
   private readonly startTimeoutMs: number;
+  private readonly healthWarmupMs: number;
   private readonly spawnImpl: NonNullable<CloudflaredQuickTunnelOptions["spawnImpl"]>;
   private readonly fetchImpl: NonNullable<CloudflaredQuickTunnelOptions["fetchImpl"]>;
   private starting: Promise<string> | null = null;
@@ -83,6 +86,7 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
     options: CloudflaredQuickTunnelOptions = {}
   ) {
     this.startTimeoutMs = options.startTimeoutMs ?? 45_000;
+    this.healthWarmupMs = options.healthWarmupMs ?? QUICK_TUNNEL_DNS_WARMUP_MS;
     this.spawnImpl = options.spawnImpl ?? ((command, args, spawnOptions) => spawn(command, args, spawnOptions));
     this.fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init));
   }
@@ -116,9 +120,24 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
     return new Promise<string>((resolve, reject) => {
       let child: ChildProcess;
       try {
+        // A user's global cloudflared config may contain named-tunnel ingress
+        // rules. Quick Tunnels must use the local URL directly, so explicitly
+        // disable config loading (NUL on Windows, /dev/null elsewhere).
+        const emptyConfig = process.platform === "win32" ? "NUL" : "/dev/null";
         child = this.spawnImpl(
           bin,
-          ["tunnel", "--url", `http://127.0.0.1:${localPort}`, "--no-autoupdate"],
+          [
+            "tunnel",
+            "--config",
+            emptyConfig,
+            "--url",
+            `http://127.0.0.1:${localPort}`,
+            "--no-autoupdate",
+            "--protocol",
+            "http2",
+            "--edge-ip-version",
+            "4",
+          ],
           { stdio: ["ignore", "pipe", "pipe"], windowsHide: true }
         );
       } catch (error) {
@@ -190,6 +209,13 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
       const waitForHealth = async (): Promise<void> => {
         const publicUrl = candidateUrl;
         if (!publicUrl) return;
+        // cloudflared announces the hostname before its public DNS record is
+        // consistently resolvable. Avoid poisoning Node's negative DNS cache
+        // with an immediate request on freshly-created Quick Tunnels.
+        if (this.healthWarmupMs > 0) {
+          await new Promise((resolveWait) => setTimeout(resolveWait, this.healthWarmupMs));
+        }
+        if (settled) return;
         while (!settled) {
           if (!isAlive()) {
             fail(new Error("cloudflared exited before the public health endpoint became ready"));
